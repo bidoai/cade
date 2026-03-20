@@ -239,3 +239,44 @@ def test_diff_missing_snapshot_raises(repository, sample_snapshot):
             date(2024, 3, 15),
             date(2024, 3, 16),  # not ingested
         )
+
+
+# ── list_counterparties ───────────────────────────────────────────────────────
+
+def test_list_counterparties(repository, sample_snapshot):
+    repository.store_snapshot(sample_snapshot, exposure_total=1_000_000.0)
+    snap2 = sample_snapshot.model_copy(
+        update={"counterparty_id": "FOO-BANK", "data_hash": None}
+    )
+    repository.store_snapshot(snap2, exposure_total=2_000_000.0)
+    cps = repository.list_counterparties()
+    assert "ACME-CORP" in cps
+    assert "FOO-BANK" in cps
+
+
+# ── find_by_trade ─────────────────────────────────────────────────────────────
+
+def test_find_by_trade_returns_match(repository, sample_snapshot):
+    repository.store_snapshot(sample_snapshot, exposure_total=1_000_000.0)
+    results = repository.find_by_trade("T-001")
+    assert len(results) == 1
+    cp_id, ns_id, d, trade = results[0]
+    assert cp_id == sample_snapshot.counterparty_id
+    assert trade.trade_id == "T-001"
+
+
+def test_find_by_trade_not_found(repository, sample_snapshot):
+    repository.store_snapshot(sample_snapshot, exposure_total=1_000_000.0)
+    results = repository.find_by_trade("T-NONEXISTENT")
+    assert results == []
+
+
+def test_find_by_trade_date_filter(repository, sample_snapshot):
+    # sample_snapshot uses cob_date=date(2024, 3, 15)
+    repository.store_snapshot(sample_snapshot, exposure_total=1_000_000.0)
+    # to_date of 2024-03-15 should include the snapshot
+    results_inclusive = repository.find_by_trade("T-001", to_date=date(2024, 3, 15))
+    assert len(results_inclusive) == 1
+    # to_date of 2024-03-14 (before snapshot date) should exclude it
+    results_before = repository.find_by_trade("T-001", to_date=date(2024, 3, 14))
+    assert results_before == []
