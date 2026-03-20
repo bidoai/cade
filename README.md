@@ -16,6 +16,7 @@ COB date today returns the same result as querying it in three years.
 - [Concepts](#concepts)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Python query API](#python-query-api)
 - [CLI reference](#cli-reference)
 - [HTTP API reference](#http-api-reference)
 - [Ingestion](#ingestion)
@@ -147,6 +148,162 @@ cade diff ACME-CORP RATES-USD --from 2024-03-14 --to 2024-03-15
 
 # Portfolio ranking for today
 cade who-matters --date 2024-03-15 --threshold 1000000 --top 10
+```
+
+---
+
+## Python query API
+
+`cade.query` provides notebook-friendly functions for reading data directly
+from Python. All functions read `CADE_DATA_DIR` from the environment by
+default. Pass an explicit `repo=` to point at a different data directory or
+backend.
+
+```python
+from datetime import date
+import cade.query as q
+```
+
+---
+
+### `q.snapshot`
+
+Retrieve a single COB snapshot (hash-verified).
+
+```python
+snap = q.snapshot("ACME-CORP", "RATES-USD", date(2024, 3, 15))
+snap.agreement.threshold_amount   # 5000000.0
+snap.trades                       # list[TradePosition]
+```
+
+---
+
+### `q.by_counterparty`
+
+All netting sets for a counterparty on one COB date.
+
+```python
+snaps = q.by_counterparty("ACME-CORP", date(2024, 3, 15))
+# {"RATES-USD": COBSnapshot, "FX-EUR": COBSnapshot, ...}
+for ns_id, snap in snaps.items():
+    print(ns_id, snap.agreement.threshold_amount)
+```
+
+---
+
+### `q.trades`
+
+Active trade positions for a netting set as a DataFrame.
+
+```python
+df = q.trades("ACME-CORP", "RATES-USD", date(2024, 3, 15))
+# columns: trade_id, product_type, notional, currency, direction, maturity_date
+
+df[df.product_type == "IRS"]["notional"].sum()
+```
+
+---
+
+### `q.by_trade`
+
+Find every (counterparty, netting set, date) that holds a given trade ID.
+Uses the trade index for fast lookup — no full snapshot scan required.
+
+```python
+df = q.by_trade("T-001")
+# columns: cob_date, counterparty_id, netting_set_id,
+#          trade_id, product_type, notional, currency, direction, maturity_date
+
+# Narrow to a date range
+df = q.by_trade("T-001", from_date=date(2024, 1, 1), to_date=date(2024, 3, 31))
+
+# Notional over time
+df.groupby("cob_date")["notional"].first()
+```
+
+---
+
+### `q.fx_rates`
+
+FX spot rates for a COB date, read from the first available snapshot.
+
+```python
+q.fx_rates(date(2024, 3, 15))
+# {"USD/GBP": 0.79, "USD/EUR": 0.92}
+
+q.fx_rates(date(2024, 3, 15), pair="USD/GBP")
+# 0.79
+```
+
+Raises `ValueError` if no snapshots exist for the date.
+Raises `KeyError` if `pair` is specified but not present.
+
+---
+
+### `q.inflation_rates`
+
+Inflation curve values for a COB date.
+
+```python
+q.inflation_rates(date(2024, 3, 15))
+# {"UK_RPI": 0.031}
+
+q.inflation_rates(date(2024, 3, 15), index="UK_RPI")
+# 0.031
+```
+
+---
+
+### `q.exposure_history`
+
+Exposure time series for a counterparty, read directly from the portfolio
+index (fast — no snapshot loading).
+
+```python
+df = q.exposure_history("ACME-CORP")
+# columns: cob_date, netting_set_id, exposure_total  (sorted by cob_date)
+
+# Filter to one netting set
+df = q.exposure_history("ACME-CORP", netting_set_id="RATES-USD")
+
+# Filter to a date range
+df = q.exposure_history(
+    "ACME-CORP",
+    from_date=date(2024, 1, 1),
+    to_date=date(2024, 3, 31),
+)
+
+df.plot(x="cob_date", y="exposure_total")
+```
+
+---
+
+### `q.portfolio`
+
+Portfolio exposure ranking for a COB date as a DataFrame.
+
+```python
+df = q.portfolio(date(2024, 3, 15))
+# columns: counterparty_id, netting_set_id, exposure_total
+# sorted by exposure_total descending
+
+# Filter and limit
+df = q.portfolio(date(2024, 3, 15), threshold=1_000_000, top_n=10)
+df.head()
+```
+
+---
+
+### Using a custom repo
+
+All functions accept an optional `repo=` keyword argument. Use this to
+point at a different data directory or inject a backend in tests:
+
+```python
+from cade.backends.parquet import ParquetBackend
+
+repo = ParquetBackend("/mnt/data/cade")
+df = q.portfolio(date(2024, 3, 15), repo=repo)
 ```
 
 ---
