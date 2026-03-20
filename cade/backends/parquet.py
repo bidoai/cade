@@ -57,6 +57,13 @@ _INDEX_SCHEMA = pa.schema([
     pa.field("ingested_at", pa.string()),
 ])
 
+_TRADE_INDEX_SCHEMA = pa.schema([
+    pa.field("trade_id", pa.string()),
+    pa.field("counterparty_id", pa.string()),
+    pa.field("netting_set_id", pa.string()),
+    pa.field("cob_date", pa.string()),
+])
+
 
 class ParquetBackend(AgreementRepository):
     def __init__(self, data_dir: str | Path) -> None:
@@ -70,6 +77,9 @@ class ParquetBackend(AgreementRepository):
 
     def _index_path(self, cob_date: date) -> Path:
         return self._root / "index" / f"{cob_date}.parquet"
+
+    def _trade_index_path(self, cob_date: date) -> Path:
+        return self._root / "trade_index" / f"{cob_date}.parquet"
 
     def _resolve_matrix_path(self, ref_path: str) -> Path:
         """Resolve a matrix reference path relative to the data root."""
@@ -121,6 +131,7 @@ class ParquetBackend(AgreementRepository):
 
         # Update portfolio index
         self._upsert_index(snapshot, exposure_total, str(snap_path.relative_to(self._root)), now)
+        self._upsert_trade_index(snapshot)
 
         return snapshot
 
@@ -151,6 +162,32 @@ class ParquetBackend(AgreementRepository):
             combined = pa.concat_tables([existing, new_row])
         else:
             combined = new_row
+
+        pq.write_table(combined, index_path)
+
+    def _upsert_trade_index(self, snapshot: COBSnapshot) -> None:
+        """Write trade_id -> (counterparty_id, netting_set_id) entries for this snapshot."""
+        if not snapshot.trades:
+            return
+
+        index_path = self._trade_index_path(snapshot.cob_date)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+
+        new_rows = pa.table(
+            {
+                "trade_id": [t.trade_id for t in snapshot.trades],
+                "counterparty_id": [snapshot.counterparty_id] * len(snapshot.trades),
+                "netting_set_id": [snapshot.netting_set_id] * len(snapshot.trades),
+                "cob_date": [str(snapshot.cob_date)] * len(snapshot.trades),
+            },
+            schema=_TRADE_INDEX_SCHEMA,
+        )
+
+        if index_path.exists():
+            existing = pq.read_table(index_path)
+            combined = pa.concat_tables([existing, new_rows])
+        else:
+            combined = new_rows
 
         pq.write_table(combined, index_path)
 
@@ -247,3 +284,50 @@ class ParquetBackend(AgreementRepository):
             summaries = summaries[:top_n]
 
         return summaries, stale
+
+    def list_counterparties(self) -> list[str]:
+        snap_dir = self._root / "snapshots"
+        if not snap_dir.exists():
+            return []
+        return sorted(p.name for p in snap_dir.iterdir() if p.is_dir())
+
+    def find_by_trade(
+        self,
+        trade_id: str,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> list[tuple[str, str, date, "TradePosition"]]:
+        """Index-based trade lookup. Reads trade_index/{date}.parquet files only."""
+        from cade.models import TradePosition
+
+        # Find all relevant trade index files
+        index_dir = self._root / "trade_index"
+        if not index_dir.exists():
+            return []
+
+        index_files = sorted(index_dir.glob("*.parquet"))
+        results = []
+
+        for idx_file in index_files:
+            try:
+                file_date = date.fromisoformat(idx_file.stem)
+            except ValueError:
+                continue
+            if from_date is not None and file_date < from_date:
+                continue
+            if to_date is not None and file_date > to_date:
+                continue
+
+            table = pq.read_table(idx_file)
+            for i in range(len(table)):
+                if table["trade_id"][i].as_py() == trade_id:
+                    cp_id = table["counterparty_id"][i].as_py()
+                    ns_id = table["netting_set_id"][i].as_py()
+                    # Load the full snapshot to get the TradePosition
+                    snap = self.get_snapshot(cp_id, ns_id, file_date)
+                    for t in snap.trades:
+                        if t.trade_id == trade_id:
+                            results.append((cp_id, ns_id, file_date, t))
+                            break
+
+        return results

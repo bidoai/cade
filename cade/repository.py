@@ -1,7 +1,11 @@
 from abc import ABC, abstractmethod
 from datetime import date
+from typing import TYPE_CHECKING
 
 from cade.models import COBSnapshot, ExposureSummary, SnapshotDiff
+
+if TYPE_CHECKING:
+    from cade.models import TradePosition
 
 
 class AgreementRepository(ABC):
@@ -45,6 +49,36 @@ class AgreementRepository(ABC):
         top_n: int | None = None,
     ) -> tuple[list[ExposureSummary], bool]:
         """Portfolio exposure ranking. Returns (summaries, index_stale)."""
+
+    @abstractmethod
+    def list_counterparties(self) -> list[str]:
+        """All counterparty IDs with at least one stored snapshot."""
+
+    def find_by_trade(
+        self,
+        trade_id: str,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> list[tuple[str, str, date, "TradePosition"]]:
+        """Find all (counterparty_id, netting_set_id, cob_date, trade) tuples
+        containing trade_id. Default implementation scans all snapshots.
+        Backends can override with an index-based approach for better performance.
+
+        Returns list of (counterparty_id, netting_set_id, cob_date, TradePosition).
+        """
+        results = []
+        for cp_id in self.list_counterparties():
+            for ns_id in self.list_netting_sets(cp_id):
+                for d in self.list_cob_dates(cp_id, ns_id):
+                    if from_date is not None and d < from_date:
+                        continue
+                    if to_date is not None and d > to_date:
+                        continue
+                    snap = self.get_snapshot(cp_id, ns_id, d)
+                    for trade in snap.trades:
+                        if trade.trade_id == trade_id:
+                            results.append((cp_id, ns_id, d, trade))
+        return results
 
     def get_diff(
         self,
