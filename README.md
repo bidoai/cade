@@ -640,14 +640,95 @@ The atomic unit of storage.
 
 ---
 
+## Architecture
+
+                        ┌─────────────────────────────────────┐
+                        │   Linux servers (daily COB dumps)    │
+                        │  ┌─────────┐ ┌─────────┐ ┌───────┐  │
+                        │  │Srv A    │ │Srv B    │ │Srv N  │  │
+                        └──┼─────────┼─┼─────────┼─┼───────┼──┘
+                           │  push_to_cade.sh (post-dump)
+                           ▼
+          ┌────────────────────────────────────────────────┐
+          │              Landing Zones                      │
+          │  ┌──────────────────┐  ┌─────────────────────┐ │
+          │  │  S3 bucket       │  │  PostgreSQL staging  │ │
+          │  │  matrices/       │  │  staging_agreements  │ │
+          │  │  {date}/{cp}/    │  │  staging_trades      │ │
+          │  │  *.npy           │  │  staging_market_data │ │
+          │  └──────────────────┘  └─────────────────────┘ │
+          └────────────────────────────────────────────────┘
+                           │
+                           │  cade-ingest run --date YYYY-MM-DD
+                           ▼
+          ┌────────────────────────────────────────────────┐
+          │          cade-ingest pipeline                   │
+          │  staging.py     read Postgres                   │
+          │  matrix_sync.py S3 → CADE_DATA_DIR/matrices/   │
+          │  assembler.py   build COBSnapshot               │
+          │  runner.py      POST /ingest (parallel)         │
+          └────────────────────────────────────────────────┘
+                           │  POST /ingest
+                           ▼
+          ┌────────────────────────────────────────────────┐
+          │              cade storage                       │
+          │  snapshots/{cp}/{ns}/{date}.parquet             │
+          │  index/{date}.parquet      (portfolio)          │
+          │  trade_index/{date}.parquet                     │
+          │  matrices/{date}/{cp}/...  (matrix files)       │
+          └────────────────────────────────────────────────┘
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+    Python: cade.query         HTTP / CLI
+    (notebooks, pyxva)   cade get / cade who-matters
+
+### Storage layout
+
+Each COB snapshot is stored as a single-row Parquet file under
+`snapshots/{counterparty_id}/{netting_set_id}/{cob_date}.parquet`.
+Nested fields (agreement, trades, market data) are JSON-encoded strings
+within the Parquet row.
+
+The portfolio index (`index/{cob_date}.parquet`) is a flat table of
+exposure totals written at ingest time, enabling fast `who-matters` queries
+without loading individual snapshot files.
+
+The trade index (`trade_index/{cob_date}.parquet`) maps trade IDs back to
+counterparty/netting-set, enabling fast `by_trade` lookups.
+
+Matrix files live under `matrices/{cob_date}/{counterparty_id}/` and are
+referenced by path + SHA-256 hash. The hash is verified on every read that
+touches matrix metadata, making silent corruption detectable.
+
+### Hash-verification contract
+
+Every snapshot carries a `data_hash` field: `sha256-v1:<hex>` of the
+canonical JSON serialisation of the snapshot's content fields. cade
+recomputes this on every `GET /counterparties/…` call. A mismatch raises
+`500 Internal Server Error` and logs a `CRITICAL` alert.
+
+Matrix files use the same `sha256-v1:` prefix scheme. The hash is stored in
+S3 object metadata by `push_to_cade.sh` and re-verified by `matrix_sync.py`
+before the file is moved to its final location. This prevents partial
+downloads and bit-rot from ever being silently accepted into cade.
+
+---
+
 ## Running tests
 
 ```bash
-pytest tests/ -v
+# Core tests (no external services required)
+uv run python -m pytest tests/ -v --ignore=tests/test_ingest_staging.py
+
+# Full suite including Postgres integration tests (requires Docker)
+uv run python -m pytest tests/ -v
 ```
 
-36 tests covering: hashing, models, repository contract (all backends),
-API integration, and CLI behaviour.
+79 tests covering: hashing, models, repository contract (all backends),
+API integration, CLI behaviour, Python query API, ingestion pipeline
+(assembler, config, matrix sync, S3 download), and Postgres staging
+(requires Docker via testcontainers).
 
 **Adding a new storage backend:**
 
