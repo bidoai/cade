@@ -20,7 +20,7 @@ class AgreementRepository(ABC):
     """
 
     @abstractmethod
-    def store_snapshot(self, snapshot: COBSnapshot, exposure_total: float) -> COBSnapshot:
+    def store_snapshot(self, snapshot: COBSnapshot, exposure_total: float = 0.0) -> COBSnapshot:
         """Persist snapshot. Sets data_hash. Returns snapshot with hash populated.
 
         Raises: DuplicateSnapshotError, MatrixReferenceError, ValueError (NaN/Inf).

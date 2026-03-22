@@ -90,7 +90,7 @@ class ParquetBackend(AgreementRepository):
 
     # ── write ─────────────────────────────────────────────────────────────────
 
-    def store_snapshot(self, snapshot: COBSnapshot, exposure_total: float) -> COBSnapshot:
+    def store_snapshot(self, snapshot: COBSnapshot, exposure_total: float = 0.0) -> COBSnapshot:
         snap_path = self._snapshot_path(
             snapshot.counterparty_id, snapshot.netting_set_id, snapshot.cob_date
         )

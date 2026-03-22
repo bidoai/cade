@@ -41,7 +41,7 @@ def health():
 
 class IngestRequest(BaseModel):
     snapshot: COBSnapshot
-    exposure_total: float
+    exposure_total: float = 0.0
 
 
 @app.post("/ingest", response_model=COBSnapshot, status_code=201)
