@@ -5,7 +5,7 @@ import io
 import json
 import os
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -29,6 +29,29 @@ def get_repo() -> ParquetBackend:
 
 def _fmt(amount: float, currency: str) -> str:
     return f"{currency} {amount:,.0f}"
+
+
+def _business_days_since(d: date) -> int:
+    """Count business days (Mon–Fri) between d and today, exclusive of d."""
+    today = date.today()
+    count = 0
+    current = d + timedelta(days=1)
+    while current <= today:
+        if current.weekday() < 5:
+            count += 1
+        current += timedelta(days=1)
+    return count
+
+
+@st.cache_data(show_spinner=False)
+def _get_exposure(cp_id: str, ns_id: str, cob_date: date) -> float | None:
+    """Look up exposure_total from the portfolio index for this snapshot."""
+    repo = get_repo()
+    summaries, _ = repo.get_portfolio(cob_date)
+    for s in summaries:
+        if s.counterparty_id == cp_id and s.netting_set_id == ns_id:
+            return s.exposure_total
+    return None
 
 
 @st.cache_data(show_spinner=False)
@@ -223,6 +246,17 @@ except Exception as e:
     st.error(f"Error loading snapshot: {e}")
     st.stop()
 
+# ── Stale data banner ─────────────────────────────────────────────────────────
+
+if available_dates:
+    last_cob = max(available_dates)
+    stale_days = _business_days_since(last_cob)
+    if stale_days > 1:
+        st.warning(
+            f"Data is **{stale_days} business day{'s' if stale_days != 1 else ''} stale** "
+            f"— last COB is {last_cob.isoformat()}. Downstream risk metrics may be outdated."
+        )
+
 # ── Data availability summary ─────────────────────────────────────────────────
 
 if available_dates:
@@ -254,6 +288,35 @@ _EXTRA_LABELS: dict[str, str] = {
 }
 
 with tab_agr:
+    # ── Exposure vs. Threshold ────────────────────────────────────────────────
+    exposure = _get_exposure(cp_id, ns_id, cob_date)
+    if exposure is not None:
+        delta = exposure - agr.threshold_amount
+        ecol1, ecol2, ecol3, ecol4 = st.columns(4)
+        ecol1.metric("Exposure", _fmt(exposure, agr.currency))
+        ecol2.metric("Threshold", _fmt(agr.threshold_amount, agr.currency))
+
+        if agr.threshold_amount == 0:
+            ecol3.metric("Threshold Type", "Zero — Two-Way")
+            ecol4.metric("MTA", _fmt(agr.minimum_transfer_amount, agr.currency))
+        else:
+            utilization = exposure / agr.threshold_amount * 100
+            label = "Over Threshold" if delta > 0 else "Under Threshold"
+            ecol3.metric(
+                label,
+                _fmt(abs(delta), agr.currency),
+                delta=f"{delta:+,.0f}",
+                delta_color="inverse",
+            )
+            ecol4.metric("Utilization", f"{utilization:.1f}%")
+
+        if delta > 0:
+            st.error(
+                f"Exposure exceeds threshold by {_fmt(delta, agr.currency)} — "
+                f"margin call may be eligible. Check MTA of {_fmt(agr.minimum_transfer_amount, agr.currency)}."
+            )
+        st.divider()
+
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -296,7 +359,8 @@ with tab_agr:
                 st.json(remainder)
 
     st.divider()
-    st.caption(f"Data hash: `{snap.data_hash}`")
+    # Hash integrity — verified on load (IntegrityError would have been raised otherwise)
+    st.caption(f"[hash verified] Data hash: `{snap.data_hash}`")
 
 with tab_trades:
     if not snap.trades:
@@ -379,6 +443,7 @@ with tab_diff:
             "Compare against",
             other_dates,
             format_func=lambda d: d.isoformat(),
+            index=0,  # auto-select the most recent previous date
         )
         if compare_date:
             from_d = min(compare_date, cob_date)
@@ -427,6 +492,16 @@ with tab_diff:
                             pd.DataFrame(
                                 [{"Pair": k, str(from_d): v[0], str(to_d): v[1]}
                                  for k, v in diff.fx_rate_changes.items()]
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    if diff.inflation_rate_changes:
+                        st.markdown("**Inflation Rate Changes**")
+                        st.dataframe(
+                            pd.DataFrame(
+                                [{"Index": k, str(from_d): f"{v[0]:.4%}", str(to_d): f"{v[1]:.4%}"}
+                                 for k, v in diff.inflation_rate_changes.items()]
                             ),
                             use_container_width=True,
                             hide_index=True,
